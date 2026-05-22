@@ -3,6 +3,8 @@ import re
 import json
 import time
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from playwright.sync_api import sync_playwright
 
 CHARACTER_NAME = os.getenv("CHARACTER_NAME", "Snadius")
@@ -10,60 +12,49 @@ SERVER_SLUG = os.getenv("SERVER_SLUG", "proudmoore")
 REGION = os.getenv("SERVER_REGION", "us")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "300"))
+TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 
-SEEN_FILE = "seen_reports.json"
+SEEN_FILE = "seen_runs.json"
 
 CHARACTER_URL = (
     f"https://www.warcraftlogs.com/character/"
-    f"{REGION}/{SERVER_SLUG}/{CHARACTER_NAME.lower()}?zone=47"
+    f"{REGION}/{SERVER_SLUG}/{CHARACTER_NAME.lower()}?zone=47&metric=playerscore"
 )
+
+
+def now_string():
+    tz = ZoneInfo(TIMEZONE)
+    return datetime.now(tz).strftime("%m/%d/%Y %I:%M %p %Z")
 
 
 def load_seen():
     if not os.path.exists(SEEN_FILE):
-        return set()
+        return {}
 
     with open(SEEN_FILE, "r") as f:
-        return set(json.load(f))
+        return json.load(f)
 
 
 def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+        json.dump(seen, f, indent=2)
 
 
-def get_report_links():
+def extract_number(text):
+    match = re.search(r"\d+", text or "")
+    if match:
+        return int(match.group())
+    return None
 
-    links = set()
+
+def get_dungeon_stats():
+    dungeon_stats = {}
 
     with sync_playwright() as p:
-
-        browser = p.chromium.launch(
-            headless=True
-        )
-
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        api_data = []
-
-        def capture_response(response):
-
-            try:
-
-                url = response.url
-
-                if "warcraftlogs" in url:
-
-                    text = response.text()
-                    api_data.append(text)
-
-            except:
-                pass
-
-        page.on(
-            "response",
-            capture_response
-        )
+        print("Opening:", CHARACTER_URL)
 
         page.goto(
             CHARACTER_URL,
@@ -71,184 +62,155 @@ def get_report_links():
             timeout=60000
         )
 
-        page.wait_for_timeout(
-            8000
-        )
+        page.wait_for_timeout(8000)
 
-        html = page.content()
+        rows = page.locator("table tr").all()
+
+        for row in rows:
+            try:
+                cells = row.locator("td").all()
+
+                # Expected columns:
+                # 0 Dungeon
+                # 1 Best %
+                # 2 Highest Points
+                # 3 Runs
+                # 4 Fastest
+                # 5 Med
+                if len(cells) < 6:
+                    continue
+
+                dungeon = cells[0].inner_text().strip()
+                runs_text = cells[3].inner_text().strip()
+                med_text = cells[5].inner_text().strip()
+
+                runs = extract_number(runs_text)
+                med = extract_number(med_text)
+
+                if dungeon and runs is not None:
+                    dungeon_stats[dungeon] = {
+                        "runs": runs,
+                        "med": med
+                    }
+
+            except Exception as e:
+                print("Row parse error:", e)
 
         browser.close()
 
-    all_content = html + "\n".join(api_data)
+    print("Dungeon stats:", dungeon_stats)
+    return dungeon_stats
 
-    print(
-        "Combined content length:",
-        len(all_content)
-    )
 
-    # Standard report links
+def med_direction(old_med, new_med):
+    if old_med is None or new_med is None:
+        return "unknown"
 
-    for code in re.findall(
-        r"/reports/([A-Za-z0-9]+)",
-        all_content
-    ):
+    if new_med > old_med:
+        return "went up"
 
-        links.add(
-            f"https://www.warcraftlogs.com/reports/{code}"
-        )
+    if new_med < old_med:
+        return "went down"
 
-    # Additional possible formats
+    return "stayed the same"
 
-    patterns = [
 
-        r'"code"\s*:\s*"([A-Za-z0-9]{8,})"',
-        r'"reportCode"\s*:\s*"([A-Za-z0-9]{8,})"',
-        r'"reportID"\s*:\s*"([A-Za-z0-9]{8,})"',
-        r'"reportId"\s*:\s*"([A-Za-z0-9]{8,})"',
-        r'"report"\s*:\s*"([A-Za-z0-9]{8,})"',
-        r'reportCode=([A-Za-z0-9]{8,})',
-        r'reportID=([A-Za-z0-9]{8,})',
-        r'report=([A-Za-z0-9]{8,})'
+def send_to_discord(changes):
+    if not DISCORD_WEBHOOK_URL:
+        print("No DISCORD_WEBHOOK_URL set.")
+        return
+
+    found_time = now_string()
+
+    lines = [
+        f"New M+ log detected for **{CHARACTER_NAME}-{SERVER_SLUG}**",
+        f"Found at: **{found_time}**",
+        "",
+        "**Dungeon updates:**"
     ]
 
-    for pattern in patterns:
+    for change in changes:
+        dungeon = change["dungeon"]
+        old_runs = change["old_runs"]
+        new_runs = change["new_runs"]
+        old_med = change["old_med"]
+        new_med = change["new_med"]
+        direction = med_direction(old_med, new_med)
 
-        for code in re.findall(
-            pattern,
-            all_content
-        ):
+        old_med_text = "N/A" if old_med is None else str(old_med)
+        new_med_text = "N/A" if new_med is None else str(new_med)
 
-            links.add(
-                f"https://www.warcraftlogs.com/reports/{code}"
-            )
-
-    print(
-        f"Found {len(links)} links"
-    )
-
-    if len(links) == 0:
-
-        print(
-            "DEBUG SEARCH"
+        lines.append(
+            f"- **{dungeon}** | Runs: **{old_runs} → {new_runs}** | Med: **{old_med_text} → {new_med_text}** ({direction})"
         )
 
-        terms = [
-            "reportCode",
-            "reportID",
-            "reportId",
-            "report",
-            "dungeon",
-            "keystone"
-        ]
-
-        for term in terms:
-
-            index = all_content.find(
-                term
-            )
-
-            if index != -1:
-
-                start = max(
-                    0,
-                    index - 300
-                )
-
-                end = min(
-                    len(all_content),
-                    index + 700
-                )
-
-                print(
-                    f"\n----- {term} -----"
-                )
-
-                print(
-                    all_content[start:end]
-                )
-
-    return links
-
-
-def send_to_discord(link):
+    lines.append("")
+    lines.append(CHARACTER_URL)
 
     payload = {
-
-        "content":
-        f"New M+ public log found for **{CHARACTER_NAME}-{SERVER_SLUG}**\n{link}"
-
+        "content": "\n".join(lines)
     }
 
     r = requests.post(
         DISCORD_WEBHOOK_URL,
-        json=payload
+        json=payload,
+        timeout=20
     )
 
     r.raise_for_status()
 
-    print(
-        "Posted:",
-        link
-    )
+    print("Posted Discord update.")
 
 
 def main():
-
-    print(
-        "Watching:",
-        CHARACTER_URL
-    )
+    print("Watching:", CHARACTER_URL)
 
     seen = load_seen()
 
-    if len(seen) == 0:
-
-        current_links = get_report_links()
-
-        seen.update(
-            current_links
-        )
-
-        save_seen(
-            seen
-        )
-
-        print(
-            f"First run complete. Marked {len(current_links)} existing links as seen."
-        )
+    if not seen:
+        current = get_dungeon_stats()
+        save_seen(current)
+        print(f"First run complete. Saved {len(current)} dungeon rows.")
+        seen = current
 
     while True:
-
         try:
+            current = get_dungeon_stats()
+            changes = []
 
-            links = get_report_links()
+            for dungeon, stats in current.items():
+                new_runs = int(stats.get("runs", 0))
+                new_med = stats.get("med")
 
-            for link in links:
+                old_stats = seen.get(dungeon)
 
-                if link not in seen:
+                if old_stats is None:
+                    old_runs = 0
+                    old_med = None
+                else:
+                    old_runs = int(old_stats.get("runs", new_runs))
+                    old_med = old_stats.get("med")
 
-                    send_to_discord(
-                        link
-                    )
+                if new_runs > old_runs:
+                    changes.append({
+                        "dungeon": dungeon,
+                        "old_runs": old_runs,
+                        "new_runs": new_runs,
+                        "old_med": old_med,
+                        "new_med": new_med
+                    })
 
-                    seen.add(
-                        link
-                    )
-
-                    save_seen(
-                        seen
-                    )
+            if changes:
+                send_to_discord(changes)
+                save_seen(current)
+                seen = current
+            else:
+                print("No new runs detected.")
 
         except Exception as e:
+            print("ERROR:", e)
 
-            print(
-                "ERROR:",
-                e
-            )
-
-        time.sleep(
-            CHECK_EVERY_SECONDS
-        )
+        time.sleep(CHECK_EVERY_SECONDS)
 
 
 if __name__ == "__main__":
