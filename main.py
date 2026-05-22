@@ -8,8 +8,8 @@ WCL_CLIENT_SECRET = os.getenv("WCL_CLIENT_SECRET")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 CHARACTER_NAME = os.getenv("CHARACTER_NAME")
-SERVER_SLUG = os.getenv("SERVER_SLUG")
-SERVER_REGION = os.getenv("SERVER_REGION", "US")
+SERVER_SLUG = os.getenv("SERVER_SLUG", "proudmoore")
+SERVER_REGION = os.getenv("SERVER_REGION", "us")
 
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "300"))
 SEEN_FILE = "seen_reports.json"
@@ -57,6 +57,8 @@ def graphql(query, variables):
     data = response.json()
 
     if "errors" in data:
+        print("GRAPHQL ERRORS:")
+        print(json.dumps(data["errors"], indent=2))
         raise Exception(data["errors"])
 
     return data["data"]
@@ -67,7 +69,17 @@ def get_character_report_codes():
     query($name: String!, $serverSlug: String!, $serverRegion: String!) {
       characterData {
         character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
+          id
+          canonicalID
           name
+          server {
+            name
+            slug
+            region {
+              name
+              compactName
+            }
+          }
           zoneRankings
         }
       }
@@ -80,7 +92,13 @@ def get_character_report_codes():
         "serverRegion": SERVER_REGION
     }
 
+    print("Checking character with variables:")
+    print(json.dumps(variables, indent=2))
+
     data = graphql(query, variables)
+
+    print("DEBUG characterData:")
+    print(json.dumps(data, indent=2)[:4000])
 
     character = data["characterData"]["character"]
 
@@ -89,23 +107,28 @@ def get_character_report_codes():
         return []
 
     rankings = character.get("zoneRankings")
-
     report_codes = set()
 
     def find_report_codes(obj):
         if isinstance(obj, dict):
             for key, value in obj.items():
                 if key == "report" and isinstance(value, dict):
+                    print("Found report field:")
+                    print(value)
+
                     code = value.get("code")
                     if code:
                         report_codes.add(code)
                 else:
                     find_report_codes(value)
+
         elif isinstance(obj, list):
             for item in obj:
                 find_report_codes(item)
 
     find_report_codes(rankings)
+
+    print("DEBUG report codes found:", report_codes)
     return list(report_codes)
 
 
@@ -145,6 +168,8 @@ def send_to_discord(report_code):
     response = requests.post(DISCORD_WEBHOOK_URL, json=message, timeout=20)
     response.raise_for_status()
 
+    print("Posted to Discord:", link)
+
 
 def first_run_setup(seen):
     report_codes = get_character_report_codes()
@@ -157,6 +182,11 @@ def first_run_setup(seen):
 
 
 def main():
+    print("Bot started.")
+    print("Character:", CHARACTER_NAME)
+    print("Server:", SERVER_SLUG)
+    print("Region:", SERVER_REGION)
+
     seen = load_seen()
 
     if len(seen) == 0:
