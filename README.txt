@@ -1,28 +1,41 @@
-# Warcraft Logs M+ Run Watcher v3
+# Warcraft Logs M+ Run Watcher v4
 
-This watches:
+Watches multiple characters:
+- Snadius-Proudmoore
+- Tinysnad-Proudmoore
 
-https://www.warcraftlogs.com/character/us/proudmoore/snadius?zone=47&metric=playerscore
+Posts:
+- Initial existing stats once per character
+- Pretty update embeds when Runs increases
+- Med old -> new with arrows
+- Dungeon name and detected time/date
 
-It posts an initial existing-stats snapshot to Discord once, then posts updates when any dungeon's Runs number increases.
-
-Discord messages include:
-- Pretty embeds
-- Dungeon names
-- Time/date detected
-- Runs old -> new
-- Med old -> new
-- Emojis/arrows for clarity
+Also supports Discord commands:
+- !status
+- !wclstatus
+- !logs
 
 ## Railway variables
 
-CHARACTER_NAME=Snadius
+CHARACTERS=Snadius,Tinysnad
 SERVER_SLUG=proudmoore
 SERVER_REGION=us
 DISCORD_WEBHOOK_URL=your_discord_webhook_url
 CHECK_EVERY_SECONDS=300
 TIMEZONE=America/New_York
 
-## Reset initial post
+Optional, for Discord status command:
+DISCORD_BOT_TOKEN=your_discord_bot_token
+COMMAND_PREFIX=!
 
-If you want the bot to post the initial stats again, delete initial_stats_posted.json from the running environment or redeploy with no persistent volume/state.
+## Discord bot setup for !status
+
+1. Go to Discord Developer Portal.
+2. Create an application.
+3. Add a bot.
+4. Copy the bot token into Railway as DISCORD_BOT_TOKEN.
+5. Enable MESSAGE CONTENT INTENT for the bot.
+6. Invite bot to your server with Send Messages and Read Message History permissions.
+7. Type !status in Discord.
+
+If DISCORD_BOT_TOKEN is not set, the watcher still runs normally and posts webhook updates.
