@@ -205,6 +205,19 @@ def send_webhook(payload):
     print("Posted Discord webhook.")
 
 
+
+def class_title_for_existing_stats(character_name):
+    lower_name = character_name.lower()
+
+    if lower_name == "tinysnad":
+        return f"🟫🛡️ Existing M+ Stats: {character_name}-{SERVER_SLUG} ⚔️🟫"
+
+    if lower_name == "snadius":
+        return f"🟥🩸 Existing M+ Stats: {character_name}-{SERVER_SLUG} ❤️ 🟥"
+
+    return f"📋 Existing M+ Stats: {character_name}-{SERVER_SLUG}"
+
+
 def send_initial_stats(character_name, stats):
     found_time = now_string()
     url = character_url(character_name)
@@ -235,7 +248,7 @@ def send_initial_stats(character_name, stats):
     payload = {
         "embeds": [
             {
-                "title": f"📋 Existing M+ Stats: {character_name}-{SERVER_SLUG}",
+                "title": class_title_for_existing_stats(character_name),
                 "description": description if description else "No dungeon stats found yet.",
                 "url": url,
                 "color": 5814783,

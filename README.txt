@@ -38,3 +38,9 @@ If you want the bot to post initial stats again, clear/delete:
 - initial_stats_posted.json
 
 On Railway without a persistent volume, redeploying may reset these files.
+
+## v6 update
+
+Class-themed initial stat titles:
+- Tinysnad: 🟫🛡️ Existing M+ Stats ... ⚔️🟫
+- Snadius: 🟥🩸 Existing M+ Stats ... ❤️ 🟥
