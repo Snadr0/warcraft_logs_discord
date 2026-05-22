@@ -1,4 +1,3 @@
 requests
 playwright==1.60.0
 tzdata
-discord.py

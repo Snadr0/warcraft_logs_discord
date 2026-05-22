@@ -2,21 +2,11 @@ import os
 import re
 import json
 import time
-import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from playwright.sync_api import sync_playwright
 
-try:
-    import discord
-except ImportError:
-    discord = None
-
-
-# Watch multiple characters at once.
-# Format:
-# CHARACTERS=Snadius,Tinysnad
 CHARACTERS = [
     name.strip()
     for name in os.getenv("CHARACTERS", "Snadius,Tinysnad").split(",")
@@ -26,16 +16,17 @@ CHARACTERS = [
 SERVER_SLUG = os.getenv("SERVER_SLUG", "proudmoore")
 REGION = os.getenv("SERVER_REGION", "us")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "300"))
 TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 
-# Optional Discord bot command support.
-# Lets you type !status in Discord.
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() == "true"
+HEARTBEAT_HOURS = float(os.getenv("HEARTBEAT_HOURS", "6"))
+POST_STARTUP_HEARTBEAT = os.getenv("POST_STARTUP_HEARTBEAT", "true").lower() == "true"
 
 STATE_FILE = "seen_runs.json"
 INITIAL_POST_FILE = "initial_stats_posted.json"
+ERROR_STATE_FILE = "error_state.json"
 
 
 bot_status = {
@@ -43,6 +34,7 @@ bot_status = {
     "last_check_at": None,
     "last_success_at": None,
     "last_error": None,
+    "last_error_at": None,
     "characters": {}
 }
 
@@ -203,14 +195,14 @@ def send_webhook(payload):
         print("No DISCORD_WEBHOOK_URL set.")
         return
 
-    r = requests.post(
+    response = requests.post(
         DISCORD_WEBHOOK_URL,
         json=payload,
         timeout=20
     )
 
-    r.raise_for_status()
-    print("Posted Discord update.")
+    response.raise_for_status()
+    print("Posted Discord webhook.")
 
 
 def send_initial_stats(character_name, stats):
@@ -295,6 +287,103 @@ def send_run_changes(character_name, changes):
     send_webhook(payload)
 
 
+def build_heartbeat_description():
+    lines = [
+        f"🕒 Started: **{bot_status.get('started_at') or 'N/A'}**",
+        f"🔎 Last check: **{bot_status.get('last_check_at') or 'N/A'}**",
+        f"✅ Last success: **{bot_status.get('last_success_at') or 'N/A'}**",
+        f"🔄 Check interval: **{CHECK_EVERY_SECONDS} seconds**",
+        "",
+        "👤 **Watching:**"
+    ]
+
+    for character_name in CHARACTERS:
+        info = bot_status["characters"].get(character_name, {})
+        rows = info.get("last_rows_found", "N/A")
+        last_seen = info.get("last_seen_at", "N/A")
+
+        lines.append(
+            f"• **{character_name}-{SERVER_SLUG}** — {rows} dungeon rows loaded, last seen {last_seen}"
+        )
+
+    lines.append("")
+
+    if bot_status.get("last_error"):
+        lines.append(f"❤️‍🩹 Last error: `{bot_status['last_error']}`")
+        lines.append(f"🕒 Error time: **{bot_status.get('last_error_at') or 'N/A'}**")
+    else:
+        lines.append("💚 Last error: **None**")
+
+    return "\n".join(lines)
+
+
+def send_startup_heartbeat():
+    payload = {
+        "embeds": [
+            {
+                "title": "🚀 Warcraft Logs Watcher Started",
+                "description": build_heartbeat_description(),
+                "color": 5814783,
+                "footer": {
+                    "text": f"Startup heartbeat • {now_string()}"
+                }
+            }
+        ]
+    }
+
+    send_webhook(payload)
+
+
+def send_regular_heartbeat():
+    title = "💚 Warcraft Logs Watcher Alive"
+
+    color = 5814783
+
+    if bot_status.get("last_error"):
+        title = "❤️‍🩹 Warcraft Logs Watcher Alive, But Last Check Had An Error"
+        color = 16753920
+
+    payload = {
+        "embeds": [
+            {
+                "title": title,
+                "description": build_heartbeat_description(),
+                "color": color,
+                "footer": {
+                    "text": f"Automatic heartbeat • {now_string()}"
+                }
+            }
+        ]
+    }
+
+    send_webhook(payload)
+
+
+def send_error_alert(error_message):
+    bot_status["last_error"] = error_message
+    bot_status["last_error_at"] = now_string()
+
+    payload = {
+        "embeds": [
+            {
+                "title": "🚨 Warcraft Logs Watcher Error",
+                "description": (
+                    f"Something broke during a check.\n\n"
+                    f"❌ Error:\n`{error_message[:900]}`\n\n"
+                    f"🕒 Time: **{bot_status['last_error_at']}**\n"
+                    f"✅ Last success: **{bot_status.get('last_success_at') or 'N/A'}**"
+                ),
+                "color": 15158332,
+                "footer": {
+                    "text": "Immediate error alert"
+                }
+            }
+        ]
+    }
+
+    send_webhook(payload)
+
+
 def check_all_characters_once():
     state = load_json_file(STATE_FILE, {})
     initial_status = load_json_file(INITIAL_POST_FILE, {})
@@ -359,96 +448,89 @@ def check_all_characters_once():
 
     bot_status["last_success_at"] = now_string()
     bot_status["last_error"] = None
+    bot_status["last_error_at"] = None
 
 
-async def monitor_loop():
+def main():
+    bot_status["started_at"] = now_string()
     print("Watching characters:", ", ".join(CHARACTERS))
+
+    last_heartbeat_at = None
+
+    try:
+        check_all_characters_once()
+
+        if POST_STARTUP_HEARTBEAT and HEARTBEAT_ENABLED:
+            send_startup_heartbeat()
+            last_heartbeat_at = now_dt()
+
+    except Exception as e:
+        error_message = str(e)
+        print("STARTUP ERROR:", error_message)
+
+        try:
+            send_error_alert(error_message)
+        except Exception as alert_error:
+            print("Failed to send startup error alert:", alert_error)
 
     while True:
         try:
-            await asyncio.to_thread(check_all_characters_once)
+            check_all_characters_once()
+
+            if HEARTBEAT_ENABLED:
+                should_send_heartbeat = False
+
+                if last_heartbeat_at is None:
+                    should_send_heartbeat = True
+                else:
+                    next_heartbeat_at = last_heartbeat_at + timedelta(hours=HEARTBEAT_HOURS)
+                    should_send_heartbeat = now_dt() >= next_heartbeat_at
+
+                if should_send_heartbeat:
+                    send_regular_heartbeat()
+                    last_heartbeat_at = now_dt()
+
         except Exception as e:
-            bot_status["last_error"] = str(e)
-            print("ERROR:", e)
+            error_message = str(e)
+            print("ERROR:", error_message)
 
-        await asyncio.sleep(CHECK_EVERY_SECONDS)
+            error_state = load_json_file(ERROR_STATE_FILE, {
+                "last_error": None,
+                "last_alert_at": None
+            })
 
+            # Avoid spamming the same exact error every 5 minutes.
+            # If the error text changes, send immediately.
+            # If same error repeats, alert once per heartbeat interval.
+            send_alert = False
 
-def build_status_message():
-    lines = [
-        "🟢 **Warcraft Logs Watcher Status**",
-        f"Watching: **{', '.join([name + '-' + SERVER_SLUG for name in CHARACTERS])}**",
-        f"Started: **{bot_status.get('started_at') or 'N/A'}**",
-        f"Last check: **{bot_status.get('last_check_at') or 'N/A'}**",
-        f"Last success: **{bot_status.get('last_success_at') or 'N/A'}**",
-        f"Check interval: **{CHECK_EVERY_SECONDS} seconds**",
-    ]
+            if error_state.get("last_error") != error_message:
+                send_alert = True
+            else:
+                last_alert_at_text = error_state.get("last_alert_at")
 
-    if bot_status.get("last_error"):
-        lines.append(f"🔴 Last error: `{bot_status['last_error']}`")
-    else:
-        lines.append("✅ Last error: **None**")
+                if not last_alert_at_text:
+                    send_alert = True
+                else:
+                    try:
+                        last_alert_at = datetime.fromisoformat(last_alert_at_text)
+                        send_alert = now_dt() >= last_alert_at + timedelta(hours=HEARTBEAT_HOURS)
+                    except Exception:
+                        send_alert = True
 
-    lines.append("")
+            if send_alert:
+                try:
+                    send_error_alert(error_message)
+                    error_state = {
+                        "last_error": error_message,
+                        "last_alert_at": now_dt().isoformat()
+                    }
+                    save_json_file(ERROR_STATE_FILE, error_state)
+                except Exception as alert_error:
+                    print("Failed to send error alert:", alert_error)
 
-    for character_name in CHARACTERS:
-        info = bot_status["characters"].get(character_name, {})
-        rows = info.get("last_rows_found", "N/A")
-        seen_at = info.get("last_seen_at", "N/A")
-        url = character_url(character_name)
-
-        lines.append(
-            f"**{character_name}-{SERVER_SLUG}** | Rows found: **{rows}** | Last seen: **{seen_at}**\n{url}"
-        )
-
-    return "\n".join(lines)
-
-
-async def run_discord_bot():
-    if not DISCORD_BOT_TOKEN:
-        print("No DISCORD_BOT_TOKEN set. Discord !status command disabled.")
-        while True:
-            await asyncio.sleep(3600)
-
-    if discord is None:
-        print("discord.py is not installed. Discord !status command disabled.")
-        while True:
-            await asyncio.sleep(3600)
-
-    intents = discord.Intents.default()
-    intents.message_content = True
-
-    client = discord.Client(intents=intents)
-
-    @client.event
-    async def on_ready():
-        print(f"Discord bot logged in as {client.user}")
-
-    @client.event
-    async def on_message(message):
-        if message.author == client.user:
-            return
-
-        content = message.content.strip().lower()
-
-        if content in [
-            f"{COMMAND_PREFIX}status",
-            f"{COMMAND_PREFIX}wclstatus",
-            f"{COMMAND_PREFIX}logs"
-        ]:
-            await message.channel.send(build_status_message())
-
-    await client.start(DISCORD_BOT_TOKEN)
-
-
-async def main():
-    bot_status["started_at"] = now_string()
-
-    await asyncio.gather(
-        monitor_loop(),
-        run_discord_bot()
-    )
+        time.sleep(CHECK_EVERY_SECONDS)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
