@@ -33,6 +33,7 @@ def save_seen(seen):
 
 
 def get_report_links():
+
     links = set()
 
     with sync_playwright() as p:
@@ -46,12 +47,14 @@ def get_report_links():
         api_data = []
 
         def capture_response(response):
+
             try:
+
                 url = response.url
 
                 if "warcraftlogs" in url:
-                    text = response.text()
 
+                    text = response.text()
                     api_data.append(text)
 
             except:
@@ -68,32 +71,101 @@ def get_report_links():
             timeout=60000
         )
 
-        page.wait_for_timeout(8000)
+        page.wait_for_timeout(
+            8000
+        )
 
         html = page.content()
 
         browser.close()
 
-        all_content = html + "\n".join(api_data)
+    all_content = html + "\n".join(api_data)
 
-        print(
-            "Combined content length:",
-            len(all_content)
+    print(
+        "Combined content length:",
+        len(all_content)
+    )
+
+    # Standard report links
+
+    for code in re.findall(
+        r"/reports/([A-Za-z0-9]+)",
+        all_content
+    ):
+
+        links.add(
+            f"https://www.warcraftlogs.com/reports/{code}"
         )
 
-        matches = re.findall(
-            r"/reports/([A-Za-z0-9]+)",
+    # Additional possible formats
+
+    patterns = [
+
+        r'"code"\s*:\s*"([A-Za-z0-9]{8,})"',
+        r'"reportCode"\s*:\s*"([A-Za-z0-9]{8,})"',
+        r'"reportID"\s*:\s*"([A-Za-z0-9]{8,})"',
+        r'"reportId"\s*:\s*"([A-Za-z0-9]{8,})"',
+        r'"report"\s*:\s*"([A-Za-z0-9]{8,})"',
+        r'reportCode=([A-Za-z0-9]{8,})',
+        r'reportID=([A-Za-z0-9]{8,})',
+        r'report=([A-Za-z0-9]{8,})'
+    ]
+
+    for pattern in patterns:
+
+        for code in re.findall(
+            pattern,
             all_content
-        )
+        ):
 
-        for code in matches:
             links.add(
                 f"https://www.warcraftlogs.com/reports/{code}"
             )
 
+    print(
+        f"Found {len(links)} links"
+    )
+
+    if len(links) == 0:
+
         print(
-            f"Found {len(links)} links"
+            "DEBUG SEARCH"
         )
+
+        terms = [
+            "reportCode",
+            "reportID",
+            "reportId",
+            "report",
+            "dungeon",
+            "keystone"
+        ]
+
+        for term in terms:
+
+            index = all_content.find(
+                term
+            )
+
+            if index != -1:
+
+                start = max(
+                    0,
+                    index - 300
+                )
+
+                end = min(
+                    len(all_content),
+                    index + 700
+                )
+
+                print(
+                    f"\n----- {term} -----"
+                )
+
+                print(
+                    all_content[start:end]
+                )
 
     return links
 
@@ -101,8 +173,10 @@ def get_report_links():
 def send_to_discord(link):
 
     payload = {
+
         "content":
-        f"New M+ public log for **{CHARACTER_NAME}-{SERVER_SLUG}**\n{link}"
+        f"New M+ public log found for **{CHARACTER_NAME}-{SERVER_SLUG}**\n{link}"
+
     }
 
     r = requests.post(
