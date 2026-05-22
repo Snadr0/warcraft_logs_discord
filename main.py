@@ -1,209 +1,81 @@
-import os
-import time
-import json
-import requests
+import os, re, json, time, requests
+from playwright.sync_api import sync_playwright
 
-WCL_CLIENT_ID = os.getenv("WCL_CLIENT_ID")
-WCL_CLIENT_SECRET = os.getenv("WCL_CLIENT_SECRET")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
-CHARACTER_NAME = os.getenv("CHARACTER_NAME")
+CHARACTER_NAME = os.getenv("CHARACTER_NAME", "Snadius")
 SERVER_SLUG = os.getenv("SERVER_SLUG", "proudmoore")
-SERVER_REGION = os.getenv("SERVER_REGION", "us")
-
+REGION = os.getenv("SERVER_REGION", "us")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "300"))
-SEEN_FILE = "seen_reports.json"
 
-WCL_TOKEN_URL = "https://www.warcraftlogs.com/oauth/token"
-WCL_API_URL = "https://www.warcraftlogs.com/api/v2/client"
+SEEN_FILE = "seen_reports.json"
+CHARACTER_URL = f"https://www.warcraftlogs.com/character/{REGION}/{SERVER_SLUG}/{CHARACTER_NAME.lower()}"
 
 
 def load_seen():
     if not os.path.exists(SEEN_FILE):
         return set()
-
-    with open(SEEN_FILE, "r") as file:
-        return set(json.load(file))
+    with open(SEEN_FILE, "r") as f:
+        return set(json.load(f))
 
 
 def save_seen(seen):
-    with open(SEEN_FILE, "w") as file:
-        json.dump(list(seen), file)
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(seen), f)
 
 
-def get_token():
-    response = requests.post(
-        WCL_TOKEN_URL,
-        data={"grant_type": "client_credentials"},
-        auth=(WCL_CLIENT_ID, WCL_CLIENT_SECRET),
-        timeout=20
-    )
+def get_report_links():
+    links = set()
 
-    response.raise_for_status()
-    return response.json()["access_token"]
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(CHARACTER_URL, wait_until="networkidle", timeout=60000)
 
+        html = page.content()
+        browser.close()
 
-def graphql(query, variables):
-    token = get_token()
+    matches = re.findall(r"/reports/[A-Za-z0-9]+", html)
 
-    response = requests.post(
-        WCL_API_URL,
-        headers={"Authorization": f"Bearer {token}"},
-        json={"query": query, "variables": variables},
-        timeout=30
-    )
+    for match in matches:
+        links.add("https://www.warcraftlogs.com" + match)
 
-    response.raise_for_status()
-    data = response.json()
-
-    if "errors" in data:
-        print("GRAPHQL ERRORS:")
-        print(json.dumps(data["errors"], indent=2))
-        raise Exception(data["errors"])
-
-    return data["data"]
+    return links
 
 
-def get_character_report_codes():
-    query = """
-    query($name: String!, $serverSlug: String!, $serverRegion: String!) {
-      characterData {
-        character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
-          id
-          canonicalID
-          name
-          server {
-            name
-            slug
-            region {
-              name
-              compactName
-            }
-          }
-          zoneRankings
-        }
-      }
-    }
-    """
-
-    variables = {
-        "name": CHARACTER_NAME,
-        "serverSlug": SERVER_SLUG,
-        "serverRegion": SERVER_REGION
-    }
-
-    print("Checking character with variables:")
-    print(json.dumps(variables, indent=2))
-
-    data = graphql(query, variables)
-
-    print("DEBUG characterData:")
-    print(json.dumps(data, indent=2)[:4000])
-
-    character = data["characterData"]["character"]
-
-    if character is None:
-        print("Character not found.")
-        return []
-
-    rankings = character.get("zoneRankings")
-    report_codes = set()
-
-    def find_report_codes(obj):
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key == "report" and isinstance(value, dict):
-                    print("Found report field:")
-                    print(value)
-
-                    code = value.get("code")
-                    if code:
-                        report_codes.add(code)
-                else:
-                    find_report_codes(value)
-
-        elif isinstance(obj, list):
-            for item in obj:
-                find_report_codes(item)
-
-    find_report_codes(rankings)
-
-    print("DEBUG report codes found:", report_codes)
-    return list(report_codes)
-
-
-def get_report_title(report_code):
-    query = """
-    query($code: String!) {
-      reportData {
-        report(code: $code) {
-          title
-          startTime
-        }
-      }
-    }
-    """
-
-    data = graphql(query, {"code": report_code})
-    report = data["reportData"]["report"]
-
-    if report:
-        return report["title"]
-
-    return "Warcraft Logs Report"
-
-
-def send_to_discord(report_code):
-    title = get_report_title(report_code)
-    link = f"https://www.warcraftlogs.com/reports/{report_code}"
-
+def send_to_discord(link):
     message = {
-        "content": (
-            f"New Warcraft Logs report found for **{CHARACTER_NAME}-{SERVER_SLUG}**\n"
-            f"**{title}**\n"
-            f"{link}"
-        )
+        "content": f"New public Warcraft Logs report found for **{CHARACTER_NAME}-{SERVER_SLUG}**:\n{link}"
     }
 
-    response = requests.post(DISCORD_WEBHOOK_URL, json=message, timeout=20)
-    response.raise_for_status()
-
-    print("Posted to Discord:", link)
-
-
-def first_run_setup(seen):
-    report_codes = get_character_report_codes()
-
-    for code in report_codes:
-        seen.add(code)
-
-    save_seen(seen)
-    print(f"First run complete. Marked {len(report_codes)} existing reports as seen.")
+    r = requests.post(DISCORD_WEBHOOK_URL, json=message, timeout=20)
+    r.raise_for_status()
+    print("Posted:", link)
 
 
 def main():
-    print("Bot started.")
-    print("Character:", CHARACTER_NAME)
-    print("Server:", SERVER_SLUG)
-    print("Region:", SERVER_REGION)
+    print("Watching:", CHARACTER_URL)
 
     seen = load_seen()
 
     if len(seen) == 0:
-        first_run_setup(seen)
+        current_links = get_report_links()
+        seen.update(current_links)
+        save_seen(seen)
+        print(f"First run complete. Marked {len(current_links)} existing links as seen.")
 
     while True:
         try:
-            report_codes = get_character_report_codes()
+            links = get_report_links()
+            print(f"Found {len(links)} report links.")
 
-            for code in report_codes:
-                if code not in seen:
-                    send_to_discord(code)
-                    seen.add(code)
+            for link in links:
+                if link not in seen:
+                    send_to_discord(link)
+                    seen.add(link)
                     save_seen(seen)
 
-        except Exception as error:
-            print("Error:", error)
+        except Exception as e:
+            print("Error:", e)
 
         time.sleep(CHECK_EVERY_SECONDS)
 
